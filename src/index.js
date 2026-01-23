@@ -5,11 +5,35 @@
 
 require('dotenv').config();
 
+const express = require('express');
 const logger = require('./utils/logger');
 const db = require('./db/connection');
 const TelegramHandler = require('./handlers/telegramHandler');
 const AutonomousScheduler = require('./tasks/autonomousScheduler');
 const zohoService = require('./services/zohoService');
+
+// Basic environment validation so we fail fast in production
+function validateEnv() {
+  const requiredEnvVars = [
+    'DATABASE_URL',
+    'TELEGRAM_BOT_TOKEN',
+    'TELEGRAM_CHAT_ID_NELSON',
+    'TELEGRAM_CHAT_ID_NICK',
+    'ZOHO_CLIENT_ID',
+    'ZOHO_CLIENT_SECRET',
+    'ZOHO_REFRESH_TOKEN',
+    'ZOHO_DATACENTER',
+  ];
+
+  const missing = requiredEnvVars.filter((key) => !process.env[key]);
+  if (missing.length > 0) {
+    logger.error('Missing required environment variables', { missing });
+    // In production (Railway) this will cause the service to restart with clear logs
+    process.exit(1);
+  }
+}
+
+validateEnv();
 
 // Global error handlers
 process.on('unhandledRejection', (reason, promise) => {
@@ -28,6 +52,7 @@ class SignatureCRMAgent {
   constructor() {
     this.telegramHandler = null;
     this.autonomousScheduler = null;
+    this.httpServer = null;
   }
 
   /**
@@ -87,6 +112,29 @@ class SignatureCRMAgent {
       await db.initializeDatabase();
       logger.info('✅ Database initialized');
 
+      // Start HTTP health server (needed for platforms like Railway)
+      const app = express();
+      const port = process.env.PORT || 3000;
+
+      app.get('/health', async (_req, res) => {
+        try {
+          // Lightweight health checks – don't block on external APIs
+          const dbHealthy = await this.testDatabaseConnection();
+          res.status(dbHealthy ? 200 : 500).json({
+            status: dbHealthy ? 'ok' : 'degraded',
+            dbHealthy,
+            env: process.env.NODE_ENV || 'development',
+          });
+        } catch (err) {
+          logger.error('Health check failed', { error: err.message });
+          res.status(500).json({ status: 'error', error: 'Health check failed' });
+        }
+      });
+
+      this.httpServer = app.listen(port, () => {
+        logger.info(`HTTP health server listening on port ${port}`);
+      });
+
       // Initialize Telegram bot
       logger.info('\n🤖 Initializing Telegram bot...');
       this.telegramHandler = new TelegramHandler();
@@ -126,6 +174,15 @@ class SignatureCRMAgent {
   async shutdown() {
     try {
       logger.info('\n🛑 Shutting down gracefully...');
+
+      if (this.httpServer) {
+        await new Promise((resolve) => {
+          this.httpServer.close(() => {
+            logger.info('HTTP health server stopped');
+            resolve();
+          });
+        });
+      }
 
       if (this.telegramHandler) {
         await this.telegramHandler.stop();
