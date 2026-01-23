@@ -66,6 +66,19 @@ class SignatureCRMAgent {
         return true;
       }
     } catch (error) {
+      // Check if it's a rate limit error - don't fail startup for this
+      const isRateLimit = error.message.includes('too many requests') || 
+                          error.message.includes('rate limit') ||
+                          error.message.includes('Access Denied');
+      
+      if (isRateLimit) {
+        logger.warn('⚠️  Zoho CRM rate limited - will retry later', { 
+          error: error.message,
+          note: 'App will start but Zoho features may be temporarily unavailable'
+        });
+        return true; // Allow startup to continue
+      }
+      
       logger.error('❌ Zoho CRM connection failed', { error: error.message });
       return false;
     }
@@ -115,9 +128,17 @@ class SignatureCRMAgent {
       const zohoConnected = await this.testZohoCRMConnection();
       const dbConnected = await this.testDatabaseConnection();
 
-      if (!zohoConnected || !dbConnected) {
-        logger.error('❌ Critical connections failed. Aborting startup.');
+      // Database is critical - must be connected
+      if (!dbConnected) {
+        logger.error('❌ Database connection failed. Aborting startup.');
         process.exit(1);
+      }
+
+      // Zoho is important but not critical for startup
+      // If rate-limited, app can start and retry later
+      if (!zohoConnected) {
+        logger.warn('⚠️  Zoho CRM unavailable - some features may be limited');
+        logger.warn('   The app will start and retry Zoho connection later');
       }
 
       // Initialize database
