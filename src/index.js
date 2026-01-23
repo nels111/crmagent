@@ -77,13 +77,27 @@ class SignatureCRMAgent {
   async testDatabaseConnection() {
     try {
       logger.info('Testing database connection...');
+      const dbUrl = process.env.DATABASE_URL;
+      if (!dbUrl) {
+        logger.error('❌ DATABASE_URL environment variable is not set');
+        return false;
+      }
+      // Log first 20 chars of URL for debugging (without exposing password)
+      const urlPreview = dbUrl.substring(0, 20) + '...';
+      logger.debug('Database URL preview', { urlPreview });
+      
       const result = await db.query('SELECT NOW()');
       if (result.rows.length > 0) {
         logger.info('✅ Database connection successful');
         return true;
       }
     } catch (error) {
-      logger.error('❌ Database connection failed', { error: error.message });
+      logger.error('❌ Database connection failed', { 
+        error: error.message,
+        code: error.code,
+        detail: error.detail,
+        hint: error.hint || 'Check DATABASE_URL format and credentials'
+      });
       return false;
     }
   }

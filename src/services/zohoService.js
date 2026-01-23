@@ -86,8 +86,14 @@ class ZohoCRMService {
       logger.debug('Access token refreshed successfully');
       return this.accessToken;
     } catch (error) {
-      logger.error('Failed to refresh Zoho access token', { error: error.message });
-      throw new Error('Zoho authentication failed');
+      const errorDetails = {
+        error: error.message,
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data
+      };
+      logger.error('Failed to refresh Zoho access token', errorDetails);
+      throw new Error(`Zoho authentication failed: ${error.message}`);
     }
   }
 

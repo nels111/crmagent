@@ -44,7 +44,13 @@ async function query(queryText, params = []) {
     logger.debug(`Query executed in ${duration}ms`, { query: queryText.substring(0, 50) });
     return result;
   } catch (error) {
-    logger.error('Database query error', { error: error.message, query: queryText });
+    logger.error('Database query error', { 
+      error: error.message, 
+      code: error.code,
+      detail: error.detail,
+      hint: error.hint,
+      query: queryText.substring(0, 100) 
+    });
     throw error;
   }
 }
