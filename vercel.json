@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "env": [
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID_NELSON",
+    "TELEGRAM_CHAT_ID_NICK",
+    "TELEGRAM_GROUP_CHAT_ID",
+    "ZOHO_CLIENT_ID",
+    "ZOHO_CLIENT_SECRET",
+    "ZOHO_REFRESH_TOKEN",
+    "ZOHO_DATACENTER",
+    "OPENAI_API_KEY",
+    "DATABASE_URL",
+    "ZOHO_EMAIL_FROM",
+    "ZOHO_EMAIL_FROM_NELSON",
+    "NODE_ENV",
+    "LOG_LEVEL"
+  ],
+  "buildCommand": "npm install",
+  "startCommand": "npm start",
+  "functions": {
+    "src/index.js": {
+      "memory": 1024,
+      "maxDuration": 900
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "name": "signature-crm-agent",
+  "version": "1.0.0",
+  "description": "Autonomous CRM operations agent for Signature Cleans",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "NODE_ENV=development node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "crm",
+    "zoho",
+    "telegram",
+    "automation",
+    "agent"
+  ],
+  "author": "Nelson Iseguan",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.6.2",
+    "axios-retry": "^2.8.0",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "node-cron": "^3.0.2",
+    "openai": "^4.24.1",
+    "pg": "^8.11.3",
+    "telegraf": "^4.14.1"
+  }
+}
