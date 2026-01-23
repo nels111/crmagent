@@ -22,21 +22,34 @@ class TelegramHandler {
 
   /**
    * Check if user is authorized
+   * Checks both chat ID (for groups) and user ID (for private chats)
    */
-  isAuthorized(chatId) {
+  isAuthorized(chatId, userId = null) {
     const chatIdStr = String(chatId);
-    const chatIdNum = chatIdStr.startsWith('-') ? chatIdStr : String(chatId);
+    const userIdStr = userId ? String(userId) : null;
     
-    // Check against all authorized user IDs (as strings)
-    const isAuth = Object.values(this.authorizedUsers).some(
-      authorizedId => authorizedId && (String(authorizedId) === chatIdStr || String(authorizedId) === chatIdNum)
-    );
+    // Get all authorized IDs as strings for comparison
+    const authorizedIds = Object.values(this.authorizedUsers)
+      .filter(id => id) // Remove null/undefined
+      .map(id => String(id));
+    
+    // Check if chat ID or user ID matches any authorized ID
+    const isAuth = authorizedIds.some(authId => {
+      return authId === chatIdStr || (userIdStr && authId === userIdStr);
+    });
     
     if (!isAuth) {
       logger.warn('Unauthorized Telegram access attempt', { 
         chatId: chatIdStr,
+        userId: userIdStr || 'not provided',
         chatIdType: typeof chatId,
-        authorizedIds: Object.values(this.authorizedUsers).map(id => id ? `${id.substring(0, 4)}...` : 'not set')
+        authorizedCount: authorizedIds.length,
+        authorizedPreview: authorizedIds.map(id => id.substring(0, 6) + '...').join(', ')
+      });
+    } else {
+      logger.debug('Authorized Telegram access', { 
+        chatId: chatIdStr.substring(0, 6) + '...',
+        userId: userIdStr ? userIdStr.substring(0, 6) + '...' : 'N/A'
       });
     }
     
@@ -61,7 +74,8 @@ class TelegramHandler {
   initializeHandlers() {
     // Start command
     this.bot.start((ctx) => {
-      if (!this.isAuthorized(ctx.chat.id)) {
+      const userId = ctx.from ? ctx.from.id : null;
+      if (!this.isAuthorized(ctx.chat.id, userId)) {
         ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
         return;
       }
@@ -128,7 +142,8 @@ class TelegramHandler {
     const startTime = Date.now();
 
     try {
-      if (!this.isAuthorized(ctx.chat.id)) {
+      const userId = ctx.from ? ctx.from.id : null;
+      if (!this.isAuthorized(ctx.chat.id, userId)) {
         ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
         return;
       }
