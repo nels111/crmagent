@@ -14,13 +14,33 @@ class TelegramHandler {
     this.authorizedUsers = {
       nelson: process.env.TELEGRAM_CHAT_ID_NELSON,
     };
+    
+    // Log authorized users for debugging (without exposing full IDs)
+    const authorizedIds = Object.values(this.authorizedUsers).map(id => id ? `${id.substring(0, 4)}...` : 'not set');
+    logger.info('Authorized Telegram users configured', { count: authorizedIds.length });
   }
 
   /**
    * Check if user is authorized
    */
   isAuthorized(chatId) {
-    return Object.values(this.authorizedUsers).includes(chatId.toString());
+    const chatIdStr = String(chatId);
+    const chatIdNum = chatIdStr.startsWith('-') ? chatIdStr : String(chatId);
+    
+    // Check against all authorized user IDs (as strings)
+    const isAuth = Object.values(this.authorizedUsers).some(
+      authorizedId => authorizedId && (String(authorizedId) === chatIdStr || String(authorizedId) === chatIdNum)
+    );
+    
+    if (!isAuth) {
+      logger.warn('Unauthorized Telegram access attempt', { 
+        chatId: chatIdStr,
+        chatIdType: typeof chatId,
+        authorizedIds: Object.values(this.authorizedUsers).map(id => id ? `${id.substring(0, 4)}...` : 'not set')
+      });
+    }
+    
+    return isAuth;
   }
 
   /**
