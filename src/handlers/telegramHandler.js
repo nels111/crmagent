@@ -183,8 +183,8 @@ class TelegramHandler {
    */
   async handleVoiceMessage(ctx) {
     try {
-      const userId = ctx.from ? ctx.from.id : null;
-      if (!this.isAuthorized(ctx.chat.id, userId)) {
+      const fromUserId = ctx.from ? ctx.from.id : null;
+      if (!this.isAuthorized(ctx.chat.id, fromUserId)) {
         ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
         return;
       }
@@ -207,8 +207,8 @@ class TelegramHandler {
    * Handle /pipeline command
    */
   async handlePipelineCommand(ctx) {
-    const userId = ctx.from ? ctx.from.id : null;
-    if (!this.isAuthorized(ctx.chat.id, userId)) {
+    const fromUserId = ctx.from ? ctx.from.id : null;
+    if (!this.isAuthorized(ctx.chat.id, fromUserId)) {
       ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
       return;
     }
@@ -222,8 +222,8 @@ class TelegramHandler {
    * Handle /metrics command
    */
   async handleMetricsCommand(ctx) {
-    const userId = ctx.from ? ctx.from.id : null;
-    if (!this.isAuthorized(ctx.chat.id, userId)) {
+    const fromUserId = ctx.from ? ctx.from.id : null;
+    if (!this.isAuthorized(ctx.chat.id, fromUserId)) {
       ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
       return;
     }
@@ -237,8 +237,8 @@ class TelegramHandler {
    * Handle /search command
    */
   async handleSearchCommand(ctx) {
-    const userId = ctx.from ? ctx.from.id : null;
-    if (!this.isAuthorized(ctx.chat.id, userId)) {
+    const fromUserId = ctx.from ? ctx.from.id : null;
+    if (!this.isAuthorized(ctx.chat.id, fromUserId)) {
       ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
       return;
     }
