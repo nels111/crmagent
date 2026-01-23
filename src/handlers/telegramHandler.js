@@ -13,7 +13,6 @@ class TelegramHandler {
     this.bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
     this.authorizedUsers = {
       nelson: process.env.TELEGRAM_CHAT_ID_NELSON,
-      nick: process.env.TELEGRAM_CHAT_ID_NICK,
     };
   }
 

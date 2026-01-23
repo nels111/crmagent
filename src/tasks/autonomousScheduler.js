@@ -249,7 +249,7 @@ class AutonomousScheduler {
       const variables = {
         first_name: sequence.contact_name?.split(' ')[0] || 'there',
         company: sequence.deal_name,
-        sender_name: 'Nick',
+        sender_name: 'Nelson',
         sender_phone: '01392 931035',
       };
 
