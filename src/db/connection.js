@@ -7,11 +7,22 @@ const { Pool } = require('pg');
 const logger = require('../utils/logger');
 
 // Create connection pool
+// Railway/Postgres typically requires SSL; localhost usually does not.
+const isLocal =
+  !process.env.DATABASE_URL ||
+  process.env.DATABASE_URL.includes('localhost') ||
+  process.env.DATABASE_URL.includes('127.0.0.1');
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 20, // Maximum number of clients in the pool
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
+  ssl: isLocal
+    ? false
+    : {
+        rejectUnauthorized: false,
+      },
 });
 
 // Handle pool errors
