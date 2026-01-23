@@ -176,11 +176,11 @@ class AutonomousScheduler {
         briefing += '\n';
       }
 
-      // Send to group chat
-      const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
-      if (groupChatId) {
-        await this.bot.telegram.sendMessage(groupChatId, briefing);
-        logger.info('Pipeline briefing sent to group chat');
+      // Send to Nelson
+      const nelsonChatId = process.env.TELEGRAM_CHAT_ID_NELSON;
+      if (nelsonChatId) {
+        await this.bot.telegram.sendMessage(nelsonChatId, briefing);
+        logger.info('Pipeline briefing sent to Nelson');
       }
     } catch (error) {
       logger.error('Failed to send pipeline briefing', { error: error.message });
@@ -281,11 +281,11 @@ class AutonomousScheduler {
         dealName: sequence.deal_name,
       });
 
-      // Alert team
-      const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
-      if (groupChatId) {
+      // Alert Nelson
+      const nelsonChatId = process.env.TELEGRAM_CHAT_ID_NELSON;
+      if (nelsonChatId) {
         await this.bot.telegram.sendMessage(
-          groupChatId,
+          nelsonChatId,
           `📧 Follow-up #${followupNumber} sent to ${sequence.contact_name} at ${sequence.deal_name}`
         );
       }
@@ -318,11 +318,11 @@ class AutonomousScheduler {
         dealName: sequence.deal_name,
       });
 
-      // Alert team
-      const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
-      if (groupChatId) {
+      // Alert Nelson
+      const nelsonChatId = process.env.TELEGRAM_CHAT_ID_NELSON;
+      if (nelsonChatId) {
         await this.bot.telegram.sendMessage(
-          groupChatId,
+          nelsonChatId,
           `💀 Deal closed as lost: ${sequence.deal_name} (£${sequence.deal_value}/mo) - No response after 21 days`
         );
       }
@@ -368,14 +368,14 @@ class AutonomousScheduler {
       if (staleDeals.length > 0) {
         logger.info(`Found ${staleDeals.length} stale deals`);
 
-        // Alert team
-        const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
-        if (groupChatId) {
+        // Alert Nelson
+        const nelsonChatId = process.env.TELEGRAM_CHAT_ID_NELSON;
+        if (nelsonChatId) {
           let message = `⚠️ STALE DEALS ALERT\n\n`;
           staleDeals.forEach((deal) => {
             message += `• ${deal.Deal_Name} - ${deal.daysSinceActivity} days - £${deal.Amount || 0}\n`;
           });
-          await this.bot.telegram.sendMessage(groupChatId, message);
+          await this.bot.telegram.sendMessage(nelsonChatId, message);
         }
       }
     } catch (error) {
