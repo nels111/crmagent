@@ -94,7 +94,8 @@ class TelegramHandler {
 
     // Help command
     this.bot.help((ctx) => {
-      if (!this.isAuthorized(ctx.chat.id)) {
+      const userId = ctx.from ? ctx.from.id : null;
+      if (!this.isAuthorized(ctx.chat.id, userId)) {
         ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
         return;
       }
@@ -142,8 +143,8 @@ class TelegramHandler {
     const startTime = Date.now();
 
     try {
-      const userId = ctx.from ? ctx.from.id : null;
-      if (!this.isAuthorized(ctx.chat.id, userId)) {
+      const fromUserId = ctx.from ? ctx.from.id : null;
+      if (!this.isAuthorized(ctx.chat.id, fromUserId)) {
         ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
         return;
       }
@@ -182,7 +183,8 @@ class TelegramHandler {
    */
   async handleVoiceMessage(ctx) {
     try {
-      if (!this.isAuthorized(ctx.chat.id)) {
+      const userId = ctx.from ? ctx.from.id : null;
+      if (!this.isAuthorized(ctx.chat.id, userId)) {
         ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
         return;
       }
@@ -205,7 +207,8 @@ class TelegramHandler {
    * Handle /pipeline command
    */
   async handlePipelineCommand(ctx) {
-    if (!this.isAuthorized(ctx.chat.id)) {
+    const userId = ctx.from ? ctx.from.id : null;
+    if (!this.isAuthorized(ctx.chat.id, userId)) {
       ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
       return;
     }
@@ -219,7 +222,8 @@ class TelegramHandler {
    * Handle /metrics command
    */
   async handleMetricsCommand(ctx) {
-    if (!this.isAuthorized(ctx.chat.id)) {
+    const userId = ctx.from ? ctx.from.id : null;
+    if (!this.isAuthorized(ctx.chat.id, userId)) {
       ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
       return;
     }
@@ -233,7 +237,8 @@ class TelegramHandler {
    * Handle /search command
    */
   async handleSearchCommand(ctx) {
-    if (!this.isAuthorized(ctx.chat.id)) {
+    const userId = ctx.from ? ctx.from.id : null;
+    if (!this.isAuthorized(ctx.chat.id, userId)) {
       ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
       return;
     }
