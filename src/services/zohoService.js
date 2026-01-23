@@ -4,8 +4,11 @@
  */
 
 const axios = require('axios');
-const axiosRetry = require('axios-retry');
+let axiosRetry = require('axios-retry');
 const logger = require('../utils/logger');
+
+// axios-retry v2+ exposes the function on the default export; support both shapes
+axiosRetry = axiosRetry.default || axiosRetry;
 
 // Configure axios with retry logic
 axiosRetry(axios, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
