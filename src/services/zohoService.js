@@ -4,14 +4,49 @@
  */
 
 const axios = require('axios');
-let axiosRetry = require('axios-retry');
 const logger = require('../utils/logger');
 
-// axios-retry v2+ exposes the function on the default export; support both shapes
-axiosRetry = axiosRetry.default || axiosRetry;
+// Configure axios with retry logic for axios-retry v4+
+// Handle CommonJS require which may return { default: function } or function directly
+let axiosRetry;
+try {
+  const axiosRetryModule = require('axios-retry');
+  
+  // axios-retry v4 exports: module.exports = axiosRetry (function) or { default: axiosRetry }
+  if (typeof axiosRetryModule === 'function') {
+    axiosRetry = axiosRetryModule;
+  } else if (axiosRetryModule && typeof axiosRetryModule.default === 'function') {
+    axiosRetry = axiosRetryModule.default;
+  } else {
+    // Fallback: try to find the function in the module
+    const keys = Object.keys(axiosRetryModule || {});
+    const funcKey = keys.find(key => typeof axiosRetryModule[key] === 'function');
+    if (funcKey) {
+      axiosRetry = axiosRetryModule[funcKey];
+    } else {
+      throw new Error('axiosRetry function not found in module exports');
+    }
+  }
 
-// Configure axios with retry logic
-axiosRetry(axios, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
+  // Get exponentialDelay - it's a named export in v4
+  const exponentialDelay = axiosRetryModule.exponentialDelay || 
+    (axiosRetryModule.default && axiosRetryModule.default.exponentialDelay) ||
+    ((retryCount) => Math.min(1000 * Math.pow(2, retryCount), 30000));
+
+  // Configure axios instance with retry
+  axiosRetry(axios, {
+    retries: 3,
+    retryDelay: exponentialDelay
+  });
+  
+  logger.debug('Axios retry configured successfully');
+} catch (error) {
+  // Log but don't fail - app can work without retry logic
+  logger.warn('Failed to configure axios-retry (continuing without retries)', { 
+    error: error.message,
+    stack: error.stack 
+  });
+}
 
 class ZohoCRMService {
   constructor() {
