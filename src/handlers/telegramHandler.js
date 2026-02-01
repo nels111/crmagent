@@ -1,23 +1,56 @@
 /**
  * Telegram Bot Handler
- * Processes incoming Telegram messages and routes to AI agent core
+ * Processes incoming Telegram messages and routes to the conversational AI agent
  */
 
 const { Telegraf } = require('telegraf');
+const axios = require('axios');
 const logger = require('../utils/logger');
-const db = require('../db/connection');
-const aiAgentCore = require('../services/aiAgentCore');
+const conversationAgent = require('../services/conversationAgent');
+const openaiService = require('../services/openaiService');
 
 class TelegramHandler {
   constructor() {
     this.bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-    this.authorizedUsers = {
-      nelson: process.env.TELEGRAM_CHAT_ID_NELSON,
-    };
-    
-    // Log authorized users for debugging (without exposing full IDs)
-    const authorizedIds = Object.values(this.authorizedUsers).map(id => id ? `${id.substring(0, 4)}...` : 'not set');
-    logger.info('Authorized Telegram users configured', { count: authorizedIds.length });
+    this.authorizedUsers = this.parseAuthorizedUsers();
+
+    // In-memory conversation history cache (per user, last N messages)
+    this.conversationCache = new Map();
+    this.maxCacheMessages = 20;
+
+    logger.info('Telegram handler initialized', {
+      authorizedCount: Object.keys(this.authorizedUsers).length,
+    });
+  }
+
+  /**
+   * Parse authorized users from environment variables
+   */
+  parseAuthorizedUsers() {
+    const users = {};
+
+    if (process.env.TELEGRAM_CHAT_ID_NELSON) {
+      users.nelson = String(process.env.TELEGRAM_CHAT_ID_NELSON);
+    }
+    if (process.env.TELEGRAM_CHAT_ID_NICK) {
+      users.nick = String(process.env.TELEGRAM_CHAT_ID_NICK);
+    }
+    if (process.env.TELEGRAM_GROUP_CHAT_ID) {
+      users.group = String(process.env.TELEGRAM_GROUP_CHAT_ID);
+    }
+
+    // Also parse any additional authorized users from comma-separated list
+    if (process.env.TELEGRAM_AUTHORIZED_USERS) {
+      const additionalUsers = process.env.TELEGRAM_AUTHORIZED_USERS.split(',');
+      additionalUsers.forEach((id, index) => {
+        const trimmedId = id.trim();
+        if (trimmedId) {
+          users[`user_${index}`] = trimmedId;
+        }
+      });
+    }
+
+    return users;
   }
 
   /**
@@ -27,45 +60,67 @@ class TelegramHandler {
   isAuthorized(chatId, userId = null) {
     const chatIdStr = String(chatId);
     const userIdStr = userId ? String(userId) : null;
-    
-    // Get all authorized IDs as strings for comparison
-    const authorizedIds = Object.values(this.authorizedUsers)
-      .filter(id => id) // Remove null/undefined
-      .map(id => String(id));
-    
-    // Check if chat ID or user ID matches any authorized ID
-    const isAuth = authorizedIds.some(authId => {
+
+    const authorizedIds = Object.values(this.authorizedUsers).filter(Boolean);
+
+    const isAuth = authorizedIds.some((authId) => {
       return authId === chatIdStr || (userIdStr && authId === userIdStr);
     });
-    
+
     if (!isAuth) {
-      logger.warn('Unauthorized Telegram access attempt', { 
+      logger.warn('Unauthorized Telegram access attempt', {
         chatId: chatIdStr,
         userId: userIdStr || 'not provided',
-        chatIdType: typeof chatId,
-        authorizedCount: authorizedIds.length,
-        authorizedPreview: authorizedIds.map(id => id.substring(0, 6) + '...').join(', ')
-      });
-    } else {
-      logger.debug('Authorized Telegram access', { 
-        chatId: chatIdStr.substring(0, 6) + '...',
-        userId: userIdStr ? userIdStr.substring(0, 6) + '...' : 'N/A'
       });
     }
-    
+
     return isAuth;
   }
 
   /**
    * Get user identifier from chat ID
    */
-  getUserId(chatId) {
-    for (const [userId, id] of Object.entries(this.authorizedUsers)) {
-      if (id === chatId.toString()) {
-        return userId;
+  getUserId(chatId, fromId = null) {
+    const chatIdStr = String(chatId);
+    const fromIdStr = fromId ? String(fromId) : null;
+
+    for (const [name, id] of Object.entries(this.authorizedUsers)) {
+      if (id === chatIdStr || id === fromIdStr) {
+        return name;
       }
     }
-    return 'unknown';
+
+    return fromIdStr || chatIdStr;
+  }
+
+  /**
+   * Get conversation cache for user
+   */
+  getConversationCache(userId) {
+    if (!this.conversationCache.has(userId)) {
+      this.conversationCache.set(userId, []);
+    }
+    return this.conversationCache.get(userId);
+  }
+
+  /**
+   * Add message to conversation cache
+   */
+  addToConversationCache(userId, role, content) {
+    const cache = this.getConversationCache(userId);
+    cache.push({ role, content });
+
+    // Keep only last N messages
+    while (cache.length > this.maxCacheMessages) {
+      cache.shift();
+    }
+  }
+
+  /**
+   * Clear conversation cache for user
+   */
+  clearConversationCache(userId) {
+    this.conversationCache.set(userId, []);
   }
 
   /**
@@ -73,55 +128,88 @@ class TelegramHandler {
    */
   initializeHandlers() {
     // Start command
-    this.bot.start((ctx) => {
-      const userId = ctx.from ? ctx.from.id : null;
+    this.bot.start(async (ctx) => {
+      const userId = ctx.from?.id;
       if (!this.isAuthorized(ctx.chat.id, userId)) {
-        ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
+        await ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
         return;
       }
 
-      ctx.reply(
-        `👋 Welcome to Signature Cleans CRM Agent!\n\n` +
+      const userName = this.getUserId(ctx.chat.id, userId);
+      this.clearConversationCache(userName);
+
+      await ctx.reply(
+        `Hello! I'm your Signature Cleans CRM assistant.\n\n` +
           `I can help you with:\n` +
-          `• Create leads: "New lead: ABC Company, John Smith, 07712345678"\n` +
-          `• Search records: "Find Sarah at Sudlow"\n` +
-          `• Pipeline summary: "Pipeline summary"\n` +
-          `• Sales metrics: "Show sales metrics"\n` +
+          `• Finding leads, contacts, and deals\n` +
+          `• Creating new leads and opportunities\n` +
+          `• Checking pipeline status and metrics\n` +
+          `• Sending follow-up emails\n` +
+          `• Creating tasks and reminders\n` +
           `• And much more!\n\n` +
-          `Send /help for all available commands.`
+          `Just tell me what you need in plain English. For example:\n` +
+          `"Find the Sudlow deal"\n` +
+          `"Create a lead for ABC Cleaning Ltd"\n` +
+          `"Show me stale deals"\n` +
+          `"What's our pipeline looking like?"\n\n` +
+          `You can also send voice messages - I'll transcribe and process them.\n\n` +
+          `Type /help for more information.`
       );
     });
 
     // Help command
-    this.bot.help((ctx) => {
-      const userId = ctx.from ? ctx.from.id : null;
+    this.bot.help(async (ctx) => {
+      const userId = ctx.from?.id;
       if (!this.isAuthorized(ctx.chat.id, userId)) {
-        ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
+        await ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
         return;
       }
 
-      ctx.reply(
-        `📚 Available Commands:\n\n` +
-          `/start - Initialize conversation\n` +
-          `/help - Show this help message\n` +
+      await ctx.reply(
+        `CRM Assistant Commands:\n\n` +
+          `/start - Start fresh conversation\n` +
+          `/help - Show this help\n` +
+          `/clear - Clear conversation history\n` +
           `/pipeline - Quick pipeline summary\n` +
-          `/metrics - Sales metrics\n` +
-          `/search [term] - Search CRM\n\n` +
+          `/stale - Show stale deals\n` +
+          `/metrics - Sales metrics overview\n\n` +
           `Or just type naturally:\n` +
-          `"Create lead for ABC Company"\n` +
-          `"What's the status of Sudlow?"\n` +
-          `"Show stale deals"`
+          `• "Find John at ABC Company"\n` +
+          `• "New lead: XYZ Ltd, contact Sarah, 07700900123"\n` +
+          `• "Move the Sudlow deal to Negotiation"\n` +
+          `• "Remind me to call Sarah tomorrow"\n` +
+          `• "Send a follow-up email to the Vistry contact"\n` +
+          `• "What's our forecast for this month?"\n\n` +
+          `Send voice notes for hands-free operation!`
       );
     });
 
+    // Clear command
+    this.bot.command('clear', async (ctx) => {
+      const userId = ctx.from?.id;
+      if (!this.isAuthorized(ctx.chat.id, userId)) {
+        return;
+      }
+
+      const userName = this.getUserId(ctx.chat.id, userId);
+      this.clearConversationCache(userName);
+      await ctx.reply('Conversation cleared. Starting fresh!');
+    });
+
     // Pipeline command
-    this.bot.command('pipeline', (ctx) => this.handlePipelineCommand(ctx));
+    this.bot.command('pipeline', async (ctx) => {
+      await this.handleTextMessage(ctx, 'Give me a pipeline summary');
+    });
+
+    // Stale command
+    this.bot.command('stale', async (ctx) => {
+      await this.handleTextMessage(ctx, 'Show me stale deals that need attention');
+    });
 
     // Metrics command
-    this.bot.command('metrics', (ctx) => this.handleMetricsCommand(ctx));
-
-    // Search command
-    this.bot.command('search', (ctx) => this.handleSearchCommand(ctx));
+    this.bot.command('metrics', async (ctx) => {
+      await this.handleTextMessage(ctx, 'Show me our sales metrics');
+    });
 
     // Text messages
     this.bot.on('text', (ctx) => this.handleTextMessage(ctx));
@@ -129,52 +217,70 @@ class TelegramHandler {
     // Voice messages
     this.bot.on('voice', (ctx) => this.handleVoiceMessage(ctx));
 
+    // Callback queries (for inline buttons)
+    this.bot.on('callback_query', (ctx) => this.handleCallbackQuery(ctx));
+
     // Error handling
     this.bot.catch((err, ctx) => {
-      logger.error('Telegram bot error', { error: err.message });
-      ctx.reply('Sorry, something went wrong. Please try again.');
+      logger.error('Telegram bot error', { error: err.message, stack: err.stack });
+      ctx.reply('Sorry, something went wrong. Please try again.').catch(() => {});
     });
   }
 
   /**
    * Handle text messages
    */
-  async handleTextMessage(ctx) {
-    const startTime = Date.now();
+  async handleTextMessage(ctx, overrideMessage = null) {
+    const userId = ctx.from?.id;
+    if (!this.isAuthorized(ctx.chat.id, userId)) {
+      await ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
+      return;
+    }
+
+    const userName = this.getUserId(ctx.chat.id, userId);
+    const message = overrideMessage || ctx.message?.text || '';
+
+    if (!message.trim()) {
+      return;
+    }
+
+    logger.info('Processing text message', { user: userName, message: message.substring(0, 100) });
 
     try {
-      const fromUserId = ctx.from ? ctx.from.id : null;
-      if (!this.isAuthorized(ctx.chat.id, fromUserId)) {
-        ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
-        return;
-      }
-
-      const userId = this.getUserId(ctx.chat.id);
-      const message = ctx.message.text;
-
-      logger.info('Received text message', { userId, message });
-
       // Show typing indicator
       await ctx.sendChatAction('typing');
 
-      // Process with AI agent core
-      const result = await aiAgentCore.processRequest(message, { userId, chatId: ctx.chat.id });
+      // Get conversation history
+      const sessionMessages = this.getConversationCache(userName);
 
-      const duration = Date.now() - startTime;
+      // Process with AI agent
+      const result = await conversationAgent.processMessage(message, {
+        userId: userName,
+        chatId: ctx.chat.id,
+        sessionMessages,
+      });
+
+      // Add to conversation cache
+      this.addToConversationCache(userName, 'user', message);
+      this.addToConversationCache(userName, 'assistant', result.response);
 
       // Log conversation
-      await db.query(
-        `INSERT INTO conversations 
-        (user_id, channel, message_type, user_message, agent_response, intent_detected, response_time_ms, success)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [userId, 'telegram', 'text', message, result.response, result.intent, duration, result.success]
+      await conversationAgent.logConversation(
+        userName,
+        message,
+        result.response,
+        result.toolsUsed || [],
+        result.duration,
+        result.success
       );
 
-      // Send response
-      ctx.reply(result.response);
+      // Send response (split if too long)
+      await this.sendLongMessage(ctx, result.response);
     } catch (error) {
-      logger.error('Error handling text message', { error: error.message });
-      ctx.reply('Sorry, something went wrong. Please try again.');
+      logger.error('Error handling text message', { error: error.message, user: userName });
+      await ctx.reply(
+        'Sorry, I encountered an error processing your request. Please try again.'
+      );
     }
   }
 
@@ -182,76 +288,155 @@ class TelegramHandler {
    * Handle voice messages
    */
   async handleVoiceMessage(ctx) {
+    const userId = ctx.from?.id;
+    if (!this.isAuthorized(ctx.chat.id, userId)) {
+      await ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
+      return;
+    }
+
+    const userName = this.getUserId(ctx.chat.id, userId);
+
+    if (!openaiService.isConfigured()) {
+      await ctx.reply(
+        'Voice messages are not available - OpenAI API key not configured. Please send text messages instead.'
+      );
+      return;
+    }
+
     try {
-      const fromUserId = ctx.from ? ctx.from.id : null;
-      if (!this.isAuthorized(ctx.chat.id, fromUserId)) {
-        ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
+      logger.info('Processing voice message', { user: userName });
+
+      // Show typing indicator
+      await ctx.sendChatAction('typing');
+      await ctx.reply('Transcribing your voice message...');
+
+      // Get file info
+      const fileId = ctx.message.voice.file_id;
+      const fileLink = await ctx.telegram.getFileLink(fileId);
+
+      // Download the audio file
+      const response = await axios.get(fileLink.href, { responseType: 'arraybuffer' });
+      const audioBuffer = Buffer.from(response.data);
+
+      // Transcribe with Whisper
+      const transcription = await openaiService.transcribeAudio(audioBuffer, 'voice.ogg');
+
+      if (!transcription || transcription.trim().length === 0) {
+        await ctx.reply("Sorry, I couldn't understand the audio. Please try again or send a text message.");
         return;
       }
 
-      const userId = this.getUserId(ctx.chat.id);
+      logger.info('Voice transcribed', { user: userName, text: transcription.substring(0, 100) });
 
-      logger.info('Received voice message', { userId });
+      // Show what was transcribed
+      await ctx.reply(`"${transcription}"\n\nProcessing...`);
 
-      await ctx.sendChatAction('typing');
-
-      // TODO: Implement voice transcription with Whisper
-      ctx.reply('Voice messages coming soon! For now, please send text messages.');
+      // Process as text message
+      await this.handleTextMessage(ctx, transcription);
     } catch (error) {
-      logger.error('Error handling voice message', { error: error.message });
-      ctx.reply('Sorry, something went wrong processing your voice message.');
+      logger.error('Error handling voice message', { error: error.message, user: userName });
+      await ctx.reply(
+        'Sorry, I had trouble processing your voice message. Please try again or send a text message.'
+      );
     }
   }
 
   /**
-   * Handle /pipeline command
+   * Handle callback queries (inline button presses)
    */
-  async handlePipelineCommand(ctx) {
-    const fromUserId = ctx.from ? ctx.from.id : null;
-    if (!this.isAuthorized(ctx.chat.id, fromUserId)) {
-      ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
+  async handleCallbackQuery(ctx) {
+    const userId = ctx.from?.id;
+    if (!this.isAuthorized(ctx.chat?.id || userId, userId)) {
+      await ctx.answerCbQuery('Not authorized');
       return;
     }
 
-    const userId = this.getUserId(ctx.chat.id);
-    const result = await aiAgentCore.processRequest('Pipeline summary', { userId });
-    ctx.reply(result.response);
+    try {
+      const data = ctx.callbackQuery.data;
+      await ctx.answerCbQuery();
+
+      // Handle different callback actions
+      if (data.startsWith('approve_email:')) {
+        const approvalId = data.split(':')[1];
+        await this.handleTextMessage(ctx, `Approve email ${approvalId}`);
+      } else if (data.startsWith('reject_email:')) {
+        const approvalId = data.split(':')[1];
+        await this.handleTextMessage(ctx, `Reject email ${approvalId}`);
+      } else if (data.startsWith('view_deal:')) {
+        const dealId = data.split(':')[1];
+        await this.handleTextMessage(ctx, `Show me details for deal ${dealId}`);
+      }
+    } catch (error) {
+      logger.error('Error handling callback query', { error: error.message });
+      await ctx.answerCbQuery('Error processing request');
+    }
   }
 
   /**
-   * Handle /metrics command
+   * Send a long message, splitting if necessary
    */
-  async handleMetricsCommand(ctx) {
-    const fromUserId = ctx.from ? ctx.from.id : null;
-    if (!this.isAuthorized(ctx.chat.id, fromUserId)) {
-      ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
+  async sendLongMessage(ctx, text, maxLength = 4000) {
+    if (text.length <= maxLength) {
+      await ctx.reply(text);
       return;
     }
 
-    const userId = this.getUserId(ctx.chat.id);
-    const result = await aiAgentCore.processRequest('Sales metrics', { userId });
-    ctx.reply(result.response);
+    // Split by paragraphs first
+    const paragraphs = text.split('\n\n');
+    let currentChunk = '';
+
+    for (const paragraph of paragraphs) {
+      if (currentChunk.length + paragraph.length + 2 > maxLength) {
+        if (currentChunk) {
+          await ctx.reply(currentChunk.trim());
+          currentChunk = '';
+        }
+
+        // If single paragraph is too long, split by lines
+        if (paragraph.length > maxLength) {
+          const lines = paragraph.split('\n');
+          for (const line of lines) {
+            if (currentChunk.length + line.length + 1 > maxLength) {
+              if (currentChunk) {
+                await ctx.reply(currentChunk.trim());
+                currentChunk = '';
+              }
+            }
+            currentChunk += line + '\n';
+          }
+        } else {
+          currentChunk = paragraph + '\n\n';
+        }
+      } else {
+        currentChunk += paragraph + '\n\n';
+      }
+    }
+
+    if (currentChunk.trim()) {
+      await ctx.reply(currentChunk.trim());
+    }
   }
 
   /**
-   * Handle /search command
+   * Send a proactive message to a user
    */
-  async handleSearchCommand(ctx) {
-    const fromUserId = ctx.from ? ctx.from.id : null;
-    if (!this.isAuthorized(ctx.chat.id, fromUserId)) {
-      ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
-      return;
+  async sendProactiveMessage(chatId, message) {
+    try {
+      await this.bot.telegram.sendMessage(chatId, message);
+      logger.info('Proactive message sent', { chatId: String(chatId).substring(0, 6) });
+    } catch (error) {
+      logger.error('Failed to send proactive message', { error: error.message, chatId });
     }
+  }
 
-    const args = ctx.message.text.split(' ').slice(1).join(' ');
-    if (!args) {
-      ctx.reply('Usage: /search [term]');
-      return;
+  /**
+   * Send a message to Nelson (primary user)
+   */
+  async sendToNelson(message) {
+    const nelsonChatId = process.env.TELEGRAM_CHAT_ID_NELSON;
+    if (nelsonChatId) {
+      await this.sendProactiveMessage(nelsonChatId, message);
     }
-
-    const userId = this.getUserId(ctx.chat.id);
-    const result = await aiAgentCore.processRequest(`Search for ${args}`, { userId });
-    ctx.reply(result.response);
   }
 
   /**

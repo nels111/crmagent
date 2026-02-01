@@ -11,6 +11,7 @@ const db = require('./db/connection');
 const TelegramHandler = require('./handlers/telegramHandler');
 const AutonomousScheduler = require('./tasks/autonomousScheduler');
 const zohoService = require('./services/zohoService');
+const openaiService = require('./services/openaiService');
 
 // Basic environment validation so we fail fast in production
 function validateEnv() {
@@ -22,6 +23,7 @@ function validateEnv() {
     'ZOHO_CLIENT_SECRET',
     'ZOHO_REFRESH_TOKEN',
     'ZOHO_DATACENTER',
+    'OPENAI_API_KEY', // Required for conversational AI
   ];
 
   const missing = requiredEnvVars.filter((key) => !process.env[key]);
@@ -123,6 +125,13 @@ class SignatureCRMAgent {
       logger.info('🚀 Starting Signature Cleans CRM Agent');
       logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
+      // Check OpenAI configuration
+      if (openaiService.isConfigured()) {
+        logger.info('✅ OpenAI API configured (GPT-4o + Whisper)');
+      } else {
+        logger.warn('⚠️  OpenAI API key not configured - AI features will be limited');
+      }
+
       // Test connections
       logger.info('\n📋 Testing Connections...');
       const zohoConnected = await this.testZohoCRMConnection();
@@ -184,18 +193,20 @@ class SignatureCRMAgent {
       logger.info('\n🎉 Signature Cleans CRM Agent is running!');
       logger.info('Listening for messages on Telegram...');
       logger.info('\n📊 Agent Capabilities:');
+      logger.info('  ✓ Conversational AI (GPT-4o powered)');
+      logger.info('  ✓ Voice message transcription (Whisper)');
       logger.info('  ✓ Lead management (create, search, update)');
       logger.info('  ✓ Deal management (create, update, close)');
       logger.info('  ✓ Pipeline analysis & forecasting');
       logger.info('  ✓ Email automation & approval workflow');
-      logger.info('  ✓ Task management');
+      logger.info('  ✓ Task management with natural language dates');
       logger.info('  ✓ Sales metrics & analytics');
       logger.info('  ✓ Global search across all modules');
-      logger.info('  ✓ Bulk operations');
+      logger.info('  ✓ Activity logging (calls, meetings, notes)');
       logger.info('  ✓ Autonomous quote follow-ups');
       logger.info('  ✓ Daily pipeline briefings');
-      logger.info('  ✓ Inbox monitoring');
       logger.info('  ✓ Stale deal detection');
+      logger.info('  ✓ Multi-turn conversation context');
     } catch (error) {
       logger.error('Failed to initialize application', { error: error.message });
       process.exit(1);
