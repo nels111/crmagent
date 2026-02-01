@@ -1,6 +1,7 @@
 /**
  * Telegram Bot Handler
  * Processes incoming Telegram messages and routes to the conversational AI agent
+ * Enterprise-grade with rate limiting and security measures
  */
 
 const { Telegraf } = require('telegraf');
@@ -9,8 +10,18 @@ const logger = require('../utils/logger');
 const conversationAgent = require('../services/conversationAgent');
 const openaiService = require('../services/openaiService');
 
+// Rate limiting configuration
+const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute
+const RATE_LIMIT_MAX_REQUESTS = 20; // Max requests per window
+const VOICE_MAX_SIZE_MB = 10; // Max voice file size
+const VOICE_DOWNLOAD_TIMEOUT_MS = 30000; // Voice download timeout
+
 class TelegramHandler {
   constructor() {
+    if (!process.env.TELEGRAM_BOT_TOKEN) {
+      throw new Error('TELEGRAM_BOT_TOKEN is required');
+    }
+
     this.bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
     this.authorizedUsers = this.parseAuthorizedUsers();
 
@@ -18,9 +29,73 @@ class TelegramHandler {
     this.conversationCache = new Map();
     this.maxCacheMessages = 20;
 
+    // Rate limiting: track requests per user
+    this.rateLimitMap = new Map();
+
+    // Periodic cleanup of rate limit and conversation cache
+    this.cleanupInterval = setInterval(() => this.cleanupCaches(), 300000); // Every 5 minutes
+
     logger.info('Telegram handler initialized', {
       authorizedCount: Object.keys(this.authorizedUsers).length,
     });
+  }
+
+  /**
+   * Clean up stale entries from caches
+   */
+  cleanupCaches() {
+    const now = Date.now();
+
+    // Clean up rate limit entries older than window
+    for (const [userId, data] of this.rateLimitMap.entries()) {
+      if (now - data.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
+        this.rateLimitMap.delete(userId);
+      }
+    }
+
+    // Limit conversation cache size (max 100 users)
+    if (this.conversationCache.size > 100) {
+      const entries = Array.from(this.conversationCache.entries());
+      // Remove oldest half
+      entries.slice(0, 50).forEach(([key]) => this.conversationCache.delete(key));
+    }
+
+    logger.debug('Caches cleaned up', {
+      rateLimitEntries: this.rateLimitMap.size,
+      conversationCacheEntries: this.conversationCache.size,
+    });
+  }
+
+  /**
+   * Check rate limit for a user
+   * @returns {boolean} true if within limit, false if rate limited
+   */
+  checkRateLimit(userId) {
+    const now = Date.now();
+    const userIdStr = String(userId);
+
+    if (!this.rateLimitMap.has(userIdStr)) {
+      this.rateLimitMap.set(userIdStr, { windowStart: now, count: 1 });
+      return true;
+    }
+
+    const userData = this.rateLimitMap.get(userIdStr);
+
+    // Reset window if expired
+    if (now - userData.windowStart > RATE_LIMIT_WINDOW_MS) {
+      userData.windowStart = now;
+      userData.count = 1;
+      return true;
+    }
+
+    // Check if within limit
+    if (userData.count >= RATE_LIMIT_MAX_REQUESTS) {
+      logger.warn('Rate limit exceeded', { userId: userIdStr, count: userData.count });
+      return false;
+    }
+
+    userData.count++;
+    return true;
   }
 
   /**
@@ -232,55 +307,89 @@ class TelegramHandler {
    */
   async handleTextMessage(ctx, overrideMessage = null) {
     const userId = ctx.from?.id;
-    if (!this.isAuthorized(ctx.chat.id, userId)) {
+    const chatId = ctx.chat?.id;
+
+    // Validate context
+    if (!chatId) {
+      logger.warn('Missing chat ID in context');
+      return;
+    }
+
+    // Authorization check
+    if (!this.isAuthorized(chatId, userId)) {
       await ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
       return;
     }
 
-    const userName = this.getUserId(ctx.chat.id, userId);
-    const message = overrideMessage || ctx.message?.text || '';
-
-    if (!message.trim()) {
+    // Rate limiting check
+    if (!this.checkRateLimit(userId || chatId)) {
+      await ctx.reply('You are sending too many messages. Please wait a moment before trying again.');
       return;
     }
 
-    logger.info('Processing text message', { user: userName, message: message.substring(0, 100) });
+    const userName = this.getUserId(chatId, userId);
+    const message = overrideMessage || ctx.message?.text || '';
+
+    // Validate message
+    const trimmedMessage = message.trim();
+    if (!trimmedMessage) {
+      return;
+    }
+
+    // Truncate extremely long messages
+    const maxMessageLength = 5000;
+    const truncatedMessage = trimmedMessage.slice(0, maxMessageLength);
+
+    logger.info('Processing text message', {
+      user: userName,
+      messageLength: truncatedMessage.length,
+      preview: truncatedMessage.substring(0, 50)
+    });
 
     try {
       // Show typing indicator
-      await ctx.sendChatAction('typing');
+      await ctx.sendChatAction('typing').catch(() => {});
 
       // Get conversation history
       const sessionMessages = this.getConversationCache(userName);
 
       // Process with AI agent
-      const result = await conversationAgent.processMessage(message, {
+      const result = await conversationAgent.processMessage(truncatedMessage, {
         userId: userName,
-        chatId: ctx.chat.id,
+        chatId,
         sessionMessages,
       });
 
       // Add to conversation cache
-      this.addToConversationCache(userName, 'user', message);
+      this.addToConversationCache(userName, 'user', truncatedMessage);
       this.addToConversationCache(userName, 'assistant', result.response);
 
-      // Log conversation
-      await conversationAgent.logConversation(
+      // Log conversation (don't await to avoid blocking response)
+      conversationAgent.logConversation(
         userName,
-        message,
+        truncatedMessage,
         result.response,
         result.toolsUsed || [],
         result.duration,
         result.success
-      );
+      ).catch(err => logger.error('Failed to log conversation', { error: err.message }));
 
       // Send response (split if too long)
       await this.sendLongMessage(ctx, result.response);
     } catch (error) {
-      logger.error('Error handling text message', { error: error.message, user: userName });
-      await ctx.reply(
-        'Sorry, I encountered an error processing your request. Please try again.'
-      );
+      logger.error('Error handling text message', {
+        error: error.message,
+        stack: error.stack,
+        user: userName
+      });
+
+      // Provide user-friendly error message
+      let errorMessage = 'Sorry, I encountered an error processing your request. Please try again.';
+      if (error.message?.includes('rate limit')) {
+        errorMessage = 'The AI service is temporarily busy. Please wait a moment and try again.';
+      }
+
+      await ctx.reply(errorMessage).catch(() => {});
     }
   }
 
@@ -289,12 +398,27 @@ class TelegramHandler {
    */
   async handleVoiceMessage(ctx) {
     const userId = ctx.from?.id;
-    if (!this.isAuthorized(ctx.chat.id, userId)) {
+    const chatId = ctx.chat?.id;
+
+    // Validate context
+    if (!chatId) {
+      logger.warn('Missing chat ID in voice message context');
+      return;
+    }
+
+    // Authorization check
+    if (!this.isAuthorized(chatId, userId)) {
       await ctx.reply('Sorry, I can only help authorized Signature Cleans team members.');
       return;
     }
 
-    const userName = this.getUserId(ctx.chat.id, userId);
+    // Rate limiting check
+    if (!this.checkRateLimit(userId || chatId)) {
+      await ctx.reply('You are sending too many messages. Please wait a moment before trying again.');
+      return;
+    }
+
+    const userName = this.getUserId(chatId, userId);
 
     if (!openaiService.isConfigured()) {
       await ctx.reply(
@@ -304,19 +428,54 @@ class TelegramHandler {
     }
 
     try {
-      logger.info('Processing voice message', { user: userName });
+      // Validate voice message
+      const voice = ctx.message?.voice;
+      if (!voice || !voice.file_id) {
+        await ctx.reply('Invalid voice message. Please try again.');
+        return;
+      }
+
+      // Check file size (Telegram provides duration in seconds)
+      const durationSeconds = voice.duration || 0;
+      if (durationSeconds > 300) { // 5 minutes max
+        await ctx.reply('Voice message is too long (max 5 minutes). Please send a shorter message.');
+        return;
+      }
+
+      // Estimate file size from duration (rough estimate)
+      const estimatedSizeMB = (voice.file_size || 0) / (1024 * 1024);
+      if (estimatedSizeMB > VOICE_MAX_SIZE_MB) {
+        await ctx.reply(`Voice file is too large (max ${VOICE_MAX_SIZE_MB}MB). Please send a shorter message.`);
+        return;
+      }
+
+      logger.info('Processing voice message', {
+        user: userName,
+        duration: durationSeconds,
+        estimatedSizeMB: estimatedSizeMB.toFixed(2)
+      });
 
       // Show typing indicator
-      await ctx.sendChatAction('typing');
+      await ctx.sendChatAction('typing').catch(() => {});
       await ctx.reply('Transcribing your voice message...');
 
       // Get file info
-      const fileId = ctx.message.voice.file_id;
-      const fileLink = await ctx.telegram.getFileLink(fileId);
+      const fileLink = await ctx.telegram.getFileLink(voice.file_id);
 
-      // Download the audio file
-      const response = await axios.get(fileLink.href, { responseType: 'arraybuffer' });
+      // Download the audio file with timeout
+      const response = await axios.get(fileLink.href, {
+        responseType: 'arraybuffer',
+        timeout: VOICE_DOWNLOAD_TIMEOUT_MS,
+        maxContentLength: VOICE_MAX_SIZE_MB * 1024 * 1024,
+      });
+
       const audioBuffer = Buffer.from(response.data);
+
+      // Validate buffer
+      if (!audioBuffer || audioBuffer.length === 0) {
+        await ctx.reply('Failed to download voice message. Please try again.');
+        return;
+      }
 
       // Transcribe with Whisper
       const transcription = await openaiService.transcribeAudio(audioBuffer, 'voice.ogg');
@@ -326,18 +485,37 @@ class TelegramHandler {
         return;
       }
 
-      logger.info('Voice transcribed', { user: userName, text: transcription.substring(0, 100) });
+      const trimmedTranscription = transcription.trim().slice(0, 5000); // Limit transcription length
+
+      logger.info('Voice transcribed', {
+        user: userName,
+        transcriptionLength: trimmedTranscription.length,
+        preview: trimmedTranscription.substring(0, 50)
+      });
 
       // Show what was transcribed
-      await ctx.reply(`"${transcription}"\n\nProcessing...`);
+      const displayTranscription = trimmedTranscription.length > 200
+        ? trimmedTranscription.substring(0, 200) + '...'
+        : trimmedTranscription;
+      await ctx.reply(`"${displayTranscription}"\n\nProcessing...`);
 
       // Process as text message
-      await this.handleTextMessage(ctx, transcription);
+      await this.handleTextMessage(ctx, trimmedTranscription);
     } catch (error) {
-      logger.error('Error handling voice message', { error: error.message, user: userName });
-      await ctx.reply(
-        'Sorry, I had trouble processing your voice message. Please try again or send a text message.'
-      );
+      logger.error('Error handling voice message', {
+        error: error.message,
+        stack: error.stack,
+        user: userName
+      });
+
+      let errorMessage = 'Sorry, I had trouble processing your voice message. Please try again or send a text message.';
+      if (error.message?.includes('timeout')) {
+        errorMessage = 'The voice message download timed out. Please try a shorter message.';
+      } else if (error.message?.includes('too large')) {
+        errorMessage = 'The voice message is too large. Please send a shorter message.';
+      }
+
+      await ctx.reply(errorMessage).catch(() => {});
     }
   }
 
@@ -457,6 +635,16 @@ class TelegramHandler {
    * Stop the bot
    */
   async stop() {
+    // Clear cleanup interval
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+
+    // Clear caches
+    this.rateLimitMap.clear();
+    this.conversationCache.clear();
+
     await this.bot.stop();
     logger.info('Telegram bot stopped');
   }

@@ -2,6 +2,7 @@
  * CRM Tools
  * Defines all CRM operations as tools for the AI agent
  * Uses OpenAI function calling format
+ * Enterprise-grade with input validation and error handling
  */
 
 const zohoService = require('./zohoService');
@@ -9,6 +10,39 @@ const advancedCrmService = require('./advancedCrmService');
 const emailService = require('./emailService');
 const db = require('../db/connection');
 const logger = require('../utils/logger');
+
+// Validation helpers
+const validators = {
+  isValidEmail(email) {
+    if (!email || typeof email !== 'string') return false;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email.trim());
+  },
+
+  isValidPhone(phone) {
+    if (!phone || typeof phone !== 'string') return true; // Phone is optional
+    // Allow various phone formats
+    const cleaned = phone.replace(/[\s\-\(\)\.]/g, '');
+    return /^[\+]?[0-9]{7,15}$/.test(cleaned);
+  },
+
+  isValidZohoId(id) {
+    if (!id || typeof id !== 'string') return false;
+    // Zoho IDs are typically numeric strings
+    return /^[0-9]+$/.test(id.trim());
+  },
+
+  sanitizeString(str, maxLength = 500) {
+    if (!str || typeof str !== 'string') return '';
+    return str.trim().slice(0, maxLength).replace(/\0/g, '');
+  },
+
+  sanitizeNumber(num, defaultVal = 0) {
+    if (num === undefined || num === null) return defaultVal;
+    const parsed = parseFloat(num);
+    return isNaN(parsed) ? defaultVal : parsed;
+  },
+};
 
 /**
  * Tool definitions for OpenAI function calling
@@ -468,85 +502,104 @@ const TOOL_DEFINITIONS = [
  * @returns {Promise<object>} Tool execution result
  */
 async function executeTool(name, args, context = {}) {
-  logger.info('Executing CRM tool', { tool: name, args });
+  // Validate name
+  if (!name || typeof name !== 'string') {
+    return { success: false, error: 'Invalid tool name' };
+  }
+
+  // Validate args is an object
+  const safeArgs = args && typeof args === 'object' ? args : {};
+
+  logger.info('Executing CRM tool', { tool: name, argKeys: Object.keys(safeArgs) });
 
   try {
     switch (name) {
       case 'search_crm':
-        return await searchCrm(args);
+        return await searchCrm(safeArgs);
       case 'create_lead':
-        return await createLead(args);
+        return await createLead(safeArgs);
       case 'update_lead':
-        return await updateLead(args);
+        return await updateLead(safeArgs);
       case 'create_deal':
-        return await createDeal(args);
+        return await createDeal(safeArgs);
       case 'update_deal':
-        return await updateDeal(args);
+        return await updateDeal(safeArgs);
       case 'get_pipeline_summary':
         return await getPipelineSummary();
       case 'get_stale_deals':
-        return await getStaleDeals(args);
+        return await getStaleDeals(safeArgs);
       case 'get_revenue_forecast':
         return await getRevenueForecast();
       case 'get_sales_metrics':
         return await getSalesMetrics();
       case 'create_task':
-        return await createTask(args);
+        return await createTask(safeArgs);
       case 'send_email':
-        return await sendEmail(args, context);
+        return await sendEmail(safeArgs, context);
       case 'start_quote_sequence':
-        return await startQuoteSequence(args);
+        return await startQuoteSequence(safeArgs);
       case 'stop_quote_sequence':
-        return await stopQuoteSequence(args);
+        return await stopQuoteSequence(safeArgs);
       case 'log_activity':
-        return await logActivity(args);
+        return await logActivity(safeArgs);
       case 'get_record_details':
-        return await getRecordDetails(args);
+        return await getRecordDetails(safeArgs);
       case 'add_tags':
-        return await addTags(args);
+        return await addTags(safeArgs);
       default:
+        logger.warn('Unknown tool requested', { tool: name });
         return { success: false, error: `Unknown tool: ${name}` };
     }
   } catch (error) {
-    logger.error('Tool execution failed', { tool: name, error: error.message });
-    return { success: false, error: error.message };
+    logger.error('Tool execution failed', { tool: name, error: error.message, stack: error.stack });
+    return { success: false, error: `Tool failed: ${error.message}` };
   }
 }
 
 // Tool implementations
 
 async function searchCrm({ query, module = 'all' }) {
-  if (module === 'all') {
-    const results = await advancedCrmService.globalSearch(query);
-    const totalResults = results.leads.length + results.contacts.length + results.deals.length;
+  // Validate query
+  const sanitizedQuery = validators.sanitizeString(query, 200);
+  if (!sanitizedQuery) {
+    return { success: false, error: 'Search query is required' };
+  }
+
+  // Validate module
+  const validModules = ['all', 'Leads', 'Contacts', 'Deals'];
+  const safeModule = validModules.includes(module) ? module : 'all';
+
+  if (safeModule === 'all') {
+    const results = await advancedCrmService.globalSearch(sanitizedQuery);
+    const totalResults = (results.leads?.length || 0) + (results.contacts?.length || 0) + (results.deals?.length || 0);
 
     if (totalResults === 0) {
-      return { success: true, found: false, message: `No results found for "${query}"` };
+      return { success: true, found: false, message: `No results found for "${sanitizedQuery}"` };
     }
 
     return {
       success: true,
       found: true,
       total: totalResults,
-      leads: results.leads,
-      contacts: results.contacts,
-      deals: results.deals,
+      leads: results.leads || [],
+      contacts: results.contacts || [],
+      deals: results.deals || [],
     };
   }
 
-  const results = await zohoService.searchRecords(query, module, 10);
-  if (results.length === 0) {
-    return { success: true, found: false, message: `No ${module} found for "${query}"` };
+  const results = await zohoService.searchRecords(sanitizedQuery, safeModule, 10);
+  if (!results || results.length === 0) {
+    return { success: true, found: false, message: `No ${safeModule} found for "${sanitizedQuery}"` };
   }
 
   return {
     success: true,
     found: true,
-    module,
+    module: safeModule,
     count: results.length,
     records: results.map(r => ({
       id: r.id,
-      name: r.Company || r.Deal_Name || `${r.First_Name} ${r.Last_Name}`,
+      name: r.Company || r.Deal_Name || `${r.First_Name || ''} ${r.Last_Name || ''}`.trim() || 'Unknown',
       status: r.Lead_Status || r.Stage,
       email: r.Email,
       phone: r.Phone,
@@ -556,13 +609,31 @@ async function searchCrm({ query, module = 'all' }) {
 }
 
 async function createLead({ company, first_name, last_name, email, phone, lead_source, notes }) {
+  // Validate company (required)
+  const sanitizedCompany = validators.sanitizeString(company, 255);
+  if (!sanitizedCompany) {
+    return { success: false, error: 'Company name is required' };
+  }
+
+  // Validate email if provided
+  const sanitizedEmail = validators.sanitizeString(email, 255);
+  if (sanitizedEmail && !validators.isValidEmail(sanitizedEmail)) {
+    return { success: false, error: 'Invalid email format' };
+  }
+
+  // Validate phone if provided
+  const sanitizedPhone = validators.sanitizeString(phone, 50);
+  if (sanitizedPhone && !validators.isValidPhone(sanitizedPhone)) {
+    return { success: false, error: 'Invalid phone number format' };
+  }
+
   // Check for existing
-  const existing = await zohoService.searchRecords(company, 'Leads', 1);
-  if (existing.length > 0) {
+  const existing = await zohoService.searchRecords(sanitizedCompany, 'Leads', 1);
+  if (existing && existing.length > 0) {
     return {
       success: false,
       error: 'duplicate',
-      message: `A lead already exists for "${company}"`,
+      message: `A lead already exists for "${sanitizedCompany}"`,
       existing: {
         id: existing[0].id,
         name: existing[0].Company,
@@ -572,25 +643,34 @@ async function createLead({ company, first_name, last_name, email, phone, lead_s
   }
 
   const leadData = {
-    Company: company,
-    First_Name: first_name || '',
-    Last_Name: last_name || company,
-    Email: email,
-    Phone: phone,
-    Lead_Source: lead_source || 'Chat',
+    Company: sanitizedCompany,
+    First_Name: validators.sanitizeString(first_name, 100) || '',
+    Last_Name: validators.sanitizeString(last_name, 100) || sanitizedCompany,
+    Email: sanitizedEmail || undefined,
+    Phone: sanitizedPhone || undefined,
+    Lead_Source: validators.sanitizeString(lead_source, 100) || 'Chat',
     Lead_Status: 'New Lead',
-    Description: notes,
+    Description: validators.sanitizeString(notes, 2000) || undefined,
   };
 
+  // Remove undefined values
+  Object.keys(leadData).forEach(key => leadData[key] === undefined && delete leadData[key]);
+
   const created = await zohoService.createLead(leadData);
-  await zohoService.addTags(created.id, 'Leads', ['Added via Agent']);
+
+  // Try to add tags but don't fail if it doesn't work
+  try {
+    await zohoService.addTags(created.id, 'Leads', ['Added via Agent']);
+  } catch (tagError) {
+    logger.warn('Failed to add tags to new lead', { error: tagError.message });
+  }
 
   return {
     success: true,
-    message: `Created new lead for ${company}`,
+    message: `Created new lead for ${sanitizedCompany}`,
     lead: {
       id: created.id,
-      company,
+      company: sanitizedCompany,
       status: 'New Lead',
     },
   };
@@ -757,59 +837,79 @@ async function createTask({ subject, due_date, priority, related_to_id, related_
 }
 
 async function sendEmail({ to_email, to_name, subject, body, template_id, deal_id, deal_value }, context = {}) {
-  let emailSubject = subject;
-  let emailBody = body;
+  // Validate email (required)
+  const sanitizedEmail = validators.sanitizeString(to_email, 255);
+  if (!sanitizedEmail || !validators.isValidEmail(sanitizedEmail)) {
+    return { success: false, error: 'Valid email address is required' };
+  }
+
+  // Validate subject (required)
+  const sanitizedSubject = validators.sanitizeString(subject, 255);
+  if (!sanitizedSubject && !template_id) {
+    return { success: false, error: 'Email subject is required' };
+  }
+
+  // Sanitize other fields
+  const sanitizedName = validators.sanitizeString(to_name, 255);
+  const sanitizedBody = validators.sanitizeString(body, 10000);
+  const sanitizedDealId = validators.sanitizeString(deal_id, 50);
+  const sanitizedDealValue = validators.sanitizeNumber(deal_value, 0);
+
+  let emailSubject = sanitizedSubject;
+  let emailBody = sanitizedBody;
 
   // Use template if specified
   if (template_id) {
     const template = emailService.getTemplate(template_id);
     if (template) {
       const variables = {
-        first_name: to_name?.split(' ')[0] || 'there',
-        company: to_name || '',
+        first_name: sanitizedName?.split(' ')[0] || 'there',
+        company: sanitizedName || '',
         sender_name: 'Nelson',
         sender_phone: '01392 931035',
       };
       emailSubject = emailService.replaceVariables(template.subject, variables);
       emailBody = emailService.replaceVariables(template.body, variables);
+    } else {
+      return { success: false, error: `Unknown email template: ${template_id}` };
     }
   }
 
   // Check if approval required
-  const needsApproval = emailService.requiresApproval(deal_value, to_name, template_id);
+  const needsApproval = emailService.requiresApproval(sanitizedDealValue, sanitizedName, template_id);
 
   if (needsApproval) {
     const approval = await emailService.queueForApproval({
-      to_email,
-      to_name,
+      to_email: sanitizedEmail,
+      to_name: sanitizedName,
       subject: emailSubject,
       body: emailBody,
-      deal_id,
-      deal_value,
+      deal_id: sanitizedDealId,
+      deal_value: sanitizedDealValue,
       template_id,
     }, context.userId || 'system');
 
     return {
       success: true,
       needs_approval: true,
-      message: `Email queued for approval (deal value: £${deal_value || 0})`,
-      approval_id: approval.id,
+      message: `Email queued for approval (deal value: £${sanitizedDealValue})`,
+      approval_id: approval?.id,
     };
   }
 
   // Send directly
   await emailService.sendEmail({
-    to_email,
-    to_name,
+    to_email: sanitizedEmail,
+    to_name: sanitizedName,
     subject: emailSubject,
     body: emailBody,
-    record_id: deal_id,
+    record_id: sanitizedDealId,
   });
 
   return {
     success: true,
     needs_approval: false,
-    message: `Email sent to ${to_name || to_email}`,
+    message: `Email sent to ${sanitizedName || sanitizedEmail}`,
   };
 }
 

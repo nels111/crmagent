@@ -127,9 +127,25 @@ class SignatureCRMAgent {
 
       // Check OpenAI configuration
       if (openaiService.isConfigured()) {
-        logger.info('✅ OpenAI API configured (GPT-4o + Whisper)');
+        logger.info('Testing OpenAI API key...');
+        try {
+          const openaiValid = await openaiService.validateApiKey();
+          if (openaiValid) {
+            logger.info('✅ OpenAI API configured (GPT-4o + Whisper)');
+          } else {
+            logger.error('❌ OpenAI API key is invalid. Please check your OPENAI_API_KEY.');
+            process.exit(1);
+          }
+        } catch (validationError) {
+          // If validation fails due to network, continue with a warning
+          logger.warn('⚠️  Could not validate OpenAI API key (network issue)', {
+            error: validationError.message
+          });
+          logger.info('   Continuing startup - API key will be validated on first request');
+        }
       } else {
-        logger.warn('⚠️  OpenAI API key not configured - AI features will be limited');
+        logger.error('❌ OpenAI API key not configured - this is required for the AI agent');
+        process.exit(1);
       }
 
       // Test connections

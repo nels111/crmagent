@@ -2,12 +2,18 @@
  * Conversation Agent
  * Production-ready conversational AI agent for CRM operations
  * Uses OpenAI with function calling for reliable, natural interactions
+ * Enterprise-grade with comprehensive error handling and validation
  */
 
 const openaiService = require('./openaiService');
 const { TOOL_DEFINITIONS, executeTool } = require('./crmTools');
 const db = require('../db/connection');
 const logger = require('../utils/logger');
+
+// Configuration
+const MAX_TOOL_CALLS = 5; // Maximum tool calls per turn to prevent infinite loops
+const MAX_MESSAGE_LENGTH = 10000; // Maximum user message length
+const MAX_CONTEXT_MESSAGES = 10; // Maximum context messages to include
 
 // System prompt that defines the agent's personality and capabilities
 const SYSTEM_PROMPT = `You are the AI assistant for Signature Cleans, a commercial cleaning company based in the UK. You help the sales team manage their CRM (Zoho CRM) through natural conversation.
@@ -48,7 +54,44 @@ Current date: ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: '
 
 class ConversationAgent {
   constructor() {
-    this.maxToolCalls = 5; // Maximum tool calls per turn to prevent infinite loops
+    this.maxToolCalls = MAX_TOOL_CALLS;
+  }
+
+  /**
+   * Sanitize user input to prevent injection attacks
+   * @param {string} input - Raw user input
+   * @returns {string} Sanitized input
+   */
+  sanitizeInput(input) {
+    if (!input || typeof input !== 'string') {
+      return '';
+    }
+
+    // Truncate if too long
+    let sanitized = input.slice(0, MAX_MESSAGE_LENGTH);
+
+    // Remove null bytes and other problematic characters
+    sanitized = sanitized.replace(/\0/g, '');
+
+    return sanitized.trim();
+  }
+
+  /**
+   * Safely parse JSON with error handling
+   * @param {string} jsonString - JSON string to parse
+   * @param {string} context - Context for error logging
+   * @returns {object|null} Parsed object or null on failure
+   */
+  safeJsonParse(jsonString, context = 'JSON parse') {
+    try {
+      return JSON.parse(jsonString);
+    } catch (error) {
+      logger.error(`${context} failed`, {
+        error: error.message,
+        input: jsonString?.substring(0, 100)
+      });
+      return null;
+    }
   }
 
   /**
@@ -61,12 +104,31 @@ class ConversationAgent {
     const startTime = Date.now();
     const { userId, chatId, sessionMessages = [] } = context;
 
+    // Sanitize input
+    const sanitizedMessage = this.sanitizeInput(message);
+    if (!sanitizedMessage) {
+      return {
+        success: false,
+        response: "I didn't receive a message. Please try again.",
+        error: 'Empty message',
+        duration: Date.now() - startTime,
+      };
+    }
+
     try {
-      // Build conversation messages
+      // Build conversation messages with sanitized context
+      const contextMessages = sessionMessages
+        .slice(-MAX_CONTEXT_MESSAGES)
+        .map(msg => ({
+          role: msg.role,
+          content: this.sanitizeInput(msg.content) || '',
+        }))
+        .filter(msg => msg.content);
+
       const messages = [
         { role: 'system', content: SYSTEM_PROMPT },
-        ...sessionMessages.slice(-10), // Keep last 10 messages for context
-        { role: 'user', content: message },
+        ...contextMessages,
+        { role: 'user', content: sanitizedMessage },
       ];
 
       // Process with potential tool calls
@@ -76,23 +138,39 @@ class ConversationAgent {
       logger.info('Conversation processed', {
         userId,
         duration,
-        toolsUsed: result.toolsUsed,
+        toolsUsed: result.toolsUsed?.map(t => t.name) || [],
       });
 
       return {
         success: true,
         response: result.response,
-        toolsUsed: result.toolsUsed,
+        toolsUsed: result.toolsUsed || [],
         duration,
       };
     } catch (error) {
-      logger.error('Conversation processing failed', { error: error.message, userId });
+      const duration = Date.now() - startTime;
+      logger.error('Conversation processing failed', {
+        error: error.message,
+        stack: error.stack,
+        userId
+      });
+
+      // User-friendly error messages
+      let userMessage = 'I encountered an error processing your request. Please try again.';
+
+      if (error.message.includes('rate limit') || error.status === 429) {
+        userMessage = "I'm receiving too many requests right now. Please wait a moment and try again.";
+      } else if (error.message.includes('API key')) {
+        userMessage = 'There is a configuration issue. Please contact support.';
+      } else if (error.message.includes('timeout')) {
+        userMessage = 'The request took too long. Please try a simpler query.';
+      }
 
       return {
         success: false,
-        response: `I encountered an error processing your request: ${error.message}. Please try again or rephrase your request.`,
+        response: userMessage,
         error: error.message,
-        duration: Date.now() - startTime,
+        duration,
       };
     }
   }
@@ -120,6 +198,11 @@ class ConversationAgent {
 
       const assistantMessage = completion.message;
 
+      // Validate assistant message
+      if (!assistantMessage) {
+        throw new Error('No response received from AI');
+      }
+
       // If no tool calls, we have the final response
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
         return {
@@ -132,13 +215,45 @@ class ConversationAgent {
       currentMessages.push(assistantMessage);
 
       for (const toolCall of assistantMessage.tool_calls) {
-        const functionName = toolCall.function.name;
-        const functionArgs = JSON.parse(toolCall.function.arguments);
+        const functionName = toolCall.function?.name;
+        const functionArgsRaw = toolCall.function?.arguments;
+
+        // Validate tool call structure
+        if (!functionName || !functionArgsRaw) {
+          logger.warn('Invalid tool call structure', { toolCall });
+          currentMessages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({ success: false, error: 'Invalid tool call' }),
+          });
+          continue;
+        }
+
+        // Safely parse function arguments
+        const functionArgs = this.safeJsonParse(functionArgsRaw, `Tool ${functionName} args`);
+        if (functionArgs === null) {
+          currentMessages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({ success: false, error: 'Failed to parse tool arguments' }),
+          });
+          continue;
+        }
 
         logger.debug('Executing tool', { function: functionName, args: functionArgs });
 
-        // Execute the tool
-        const toolResult = await executeTool(functionName, functionArgs, context);
+        // Execute the tool with error handling
+        let toolResult;
+        try {
+          toolResult = await executeTool(functionName, functionArgs, context);
+        } catch (toolError) {
+          logger.error('Tool execution error', {
+            tool: functionName,
+            error: toolError.message
+          });
+          toolResult = { success: false, error: toolError.message };
+        }
+
         toolsUsed.push({ name: functionName, args: functionArgs, result: toolResult });
 
         // Add tool result to messages
@@ -151,6 +266,8 @@ class ConversationAgent {
     }
 
     // If we hit max iterations, get a final response
+    logger.warn('Hit max tool call iterations', { iterations: this.maxToolCalls });
+
     const finalCompletion = await openaiService.createChatCompletion(
       currentMessages,
       null, // No tools for final response
@@ -158,7 +275,7 @@ class ConversationAgent {
     );
 
     return {
-      response: finalCompletion.message.content || "I've completed the requested operations.",
+      response: finalCompletion.message?.content || "I've completed the requested operations.",
       toolsUsed,
     };
   }
@@ -169,10 +286,14 @@ class ConversationAgent {
    * @returns {Promise<object>} Session data
    */
   async getSession(userId) {
+    if (!userId) {
+      return { user_id: 'anonymous', mentioned_entities: {}, last_search_results: {} };
+    }
+
     try {
       const result = await db.query(
         'SELECT * FROM session_state WHERE user_id = $1',
-        [userId]
+        [String(userId)]
       );
 
       if (result.rows.length > 0) {
@@ -184,7 +305,7 @@ class ConversationAgent {
         `INSERT INTO session_state (user_id, mentioned_entities, last_search_results)
          VALUES ($1, '{}', '{}')
          RETURNING *`,
-        [userId]
+        [String(userId)]
       );
 
       return newSession.rows[0];
@@ -200,30 +321,32 @@ class ConversationAgent {
    * @param {object} updates - Session updates
    */
   async updateSession(userId, updates) {
+    if (!userId) return;
+
     try {
       const setClause = [];
-      const values = [userId];
+      const values = [String(userId)];
       let paramIndex = 2;
 
       if (updates.current_record_id !== undefined) {
         setClause.push(`current_record_id = $${paramIndex++}`);
-        values.push(updates.current_record_id);
+        values.push(String(updates.current_record_id || ''));
       }
       if (updates.current_record_module !== undefined) {
         setClause.push(`current_record_module = $${paramIndex++}`);
-        values.push(updates.current_record_module);
+        values.push(String(updates.current_record_module || ''));
       }
       if (updates.current_record_name !== undefined) {
         setClause.push(`current_record_name = $${paramIndex++}`);
-        values.push(updates.current_record_name);
+        values.push(String(updates.current_record_name || ''));
       }
       if (updates.mentioned_entities !== undefined) {
         setClause.push(`mentioned_entities = $${paramIndex++}`);
-        values.push(JSON.stringify(updates.mentioned_entities));
+        values.push(JSON.stringify(updates.mentioned_entities || {}));
       }
       if (updates.last_search_results !== undefined) {
         setClause.push(`last_search_results = $${paramIndex++}`);
-        values.push(JSON.stringify(updates.last_search_results));
+        values.push(JSON.stringify(updates.last_search_results || {}));
       }
 
       if (setClause.length > 0) {
@@ -245,6 +368,8 @@ class ConversationAgent {
    * @returns {Promise<array>} Recent messages
    */
   async getConversationHistory(userId, limit = 10) {
+    if (!userId) return [];
+
     try {
       const result = await db.query(
         `SELECT user_message, agent_response
@@ -252,7 +377,7 @@ class ConversationAgent {
          WHERE user_id = $1 AND success = true
          ORDER BY created_at DESC
          LIMIT $2`,
-        [userId, limit]
+        [String(userId), Math.min(limit, 50)] // Cap at 50 for safety
       );
 
       // Convert to message format and reverse to chronological order
@@ -284,20 +409,25 @@ class ConversationAgent {
    */
   async logConversation(userId, userMessage, agentResponse, toolsUsed, duration, success) {
     try {
+      // Truncate long messages for database storage
+      const maxDbLength = 10000;
+      const truncatedUserMessage = userMessage?.slice(0, maxDbLength) || '';
+      const truncatedResponse = agentResponse?.slice(0, maxDbLength) || '';
+
       await db.query(
         `INSERT INTO conversations
          (user_id, channel, message_type, user_message, agent_response, intent_detected, tools_called, response_time_ms, success)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
         [
-          userId,
+          String(userId || 'anonymous'),
           'telegram',
           'text',
-          userMessage,
-          agentResponse,
-          toolsUsed.length > 0 ? toolsUsed[0].name : 'conversation',
-          toolsUsed.map(t => t.name),
-          duration,
-          success,
+          truncatedUserMessage,
+          truncatedResponse,
+          toolsUsed?.length > 0 ? toolsUsed[0].name : 'conversation',
+          toolsUsed?.map(t => t.name) || [],
+          Math.round(duration) || 0,
+          Boolean(success),
         ]
       );
     } catch (error) {
